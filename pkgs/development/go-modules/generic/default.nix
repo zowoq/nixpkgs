@@ -26,6 +26,9 @@
 # Whether to run the vend tool to regenerate the vendor directory.
 # This is useful if any dependency contain C files.
 , runVend ? false
+# Whether to proxy the vendor directory via `go mod download`.
+# This is useful if any dependency has case-insensitive conflicts.
+, proxyVendor ? false
 
 # We want parallel builds by default
 , enableParallelBuilding ? true
@@ -42,6 +45,8 @@
 , ... }@args':
 
 with builtins;
+
+assert (runVend == true && proxyVendor == true) -> throw "can't use `runVend` and `proxyVendor` together";
 
 assert goPackagePath != "" -> throw "`goPackagePath` is not needed with `buildGoModule`";
 
@@ -94,6 +99,9 @@ let
     ${if runVend then ''
       echo "running 'vend' to rewrite vendor folder"
       ${vend}/bin/vend
+    '' else if proxyVendor then ''
+      mkdir -p "''${GOPATH}/pkg/mod/cache/download"
+      go mod download
     '' else ''
       go mod vendor
     ''}
@@ -106,8 +114,12 @@ let
     installPhase = args.modInstallPhase or ''
       runHook preInstall
 
-      # remove cached lookup results and tiles
+    ${if proxyVendor then ''
+      rm -rf "''${GOPATH}/pkg/mod/cache/download/sumdb"
+      cp -r --reflink=auto "''${GOPATH}/pkg/mod/cache/download" $out
+    '' else ''
       cp -r --reflink=auto vendor $out
+    ''}
 
       runHook postInstall
     '';
@@ -127,7 +139,7 @@ let
     inherit (go) GOOS GOARCH;
 
     GO111MODULE = "on";
-    GOFLAGS = [ "-mod=vendor" ] ++ lib.optionals (!allowGoReference) [ "-trimpath" ];
+    GOFLAGS = lib.optionals (!proxyVendor) [ "-mod=vendor" ] ++ lib.optionals (!allowGoReference) [ "-trimpath" ];
 
     configurePhase = args.configurePhase or ''
       runHook preConfigure
@@ -135,11 +147,15 @@ let
       export GOCACHE=$TMPDIR/go-cache
       export GOPATH="$TMPDIR/go"
       export GOSUMDB=off
-      export GOPROXY=off
       cd "$modRoot"
     '' + lib.optionalString (go-modules != "") ''
-      rm -rf vendor
-      cp -r --reflink=auto ${go-modules} vendor
+      ${if proxyVendor then ''
+        export GOPROXY=file://${go-modules}
+      '' else ''
+        export GOPROXY=off
+        rm -rf vendor
+        cp -r --reflink=auto ${go-modules} vendor
+      ''}
     '' + ''
 
       runHook postConfigure
